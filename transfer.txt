@@ -1,0 +1,154 @@
+import os
+import time
+import requests
+import pandas as pd
+import numpy as np
+import cv2  # Assicurati di averlo installato: pip install opencv-python
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+from datetime import datetime, timedelta, timezone
+
+# --- CONFIGURAZIONE ---
+BASE_PROJECT_PATH = Path.home() / "Desktop" / "scrapingForFood"
+FILE_NAME = BASE_PROJECT_PATH / "reddit_food_full_dataset.json"
+
+SUBREDDIT = "food"
+KEYWORDS = ["burger", "pasta", "sushi", "cake", "mexican"] 
+
+MAX_POSTS_PER_KEYWORD = 50 
+MAX_TOTAL_POSTS = 100 
+MAX_RUNTIME_MINUTES = 30 
+
+if not BASE_PROJECT_PATH.exists():
+    BASE_PROJECT_PATH.mkdir(parents=True, exist_ok=True)
+
+def analyze_image_from_url(url):
+    """
+    Scarica l'immagine in RAM, la decodifica con OpenCV ed estrae le feature.
+    Sostituisce la vecchia funzione download_image.
+    """
+    try:
+        response = requests.get(url, stream=True, timeout=10)
+        if response.status_code == 200:
+            # Converte il contenuto scaricato in un array numpy per OpenCV
+            image_array = np.asarray(bytearray(response.content), dtype="uint8")
+            img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+            
+            if img is None: return None
+
+            # 1. BLURRINESS (Varianza di Laplace)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            blurriness = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+            # 2. WARMTH (Media canale b nello spazio LAB)
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+            _, _, b_channel = cv2.split(lab)
+            warmth = b_channel.mean()
+
+            # 3. CENTERING (Distanza del baricentro dal centro geometrico)
+            M = cv2.moments(gray)
+            dist_centro = 0
+            if M["m00"] != 0:
+                cX = int(M["m10"] / M["m00"])
+                cY = int(M["m01"] / M["m00"])
+                H, W = img.shape[:2]
+                dist_centro = np.sqrt(((cX - W/2)*2) + ((cY - H/2)*2))
+
+            return {
+                "blurriness": round(blurriness, 2),
+                "warmth": round(warmth, 2),
+                "centering": round(dist_centro, 2)
+            }
+    except Exception as e:
+        print(f"  [ERROR] Analisi fallita per {url}: {e}")
+    return None
+
+def save_and_append_data(new_posts):
+    if not new_posts: return
+    if FILE_NAME.exists():
+        try:
+            existing_df = pd.read_json(FILE_NAME)
+        except:
+            existing_df = pd.DataFrame()
+    else:
+        existing_df = pd.DataFrame()
+
+    new_df = pd.DataFrame(new_posts)
+    final_df = pd.concat([existing_df, new_df], ignore_index=True)
+    if not final_df.empty:
+        final_df.drop_duplicates(subset=['url'], keep='first', inplace=True)
+    
+    final_df.to_json(FILE_NAME, orient="records", indent=4)
+    print(f"\n[LOG] Dataset aggiornato. Record totali: {len(final_df)}")
+
+def scrape_reddit_multi_keyword(subreddit_name):
+    date_limit = datetime.now(timezone.utc) - timedelta(days=30)
+    execution_start = time.time()
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context(locale="en-US")
+        page = context.new_page()
+
+        for query in KEYWORDS:
+            # Logica dei limiti...
+            elapsed = (time.time() - execution_start) / 60
+            if elapsed >= MAX_RUNTIME_MINUTES: break
+
+            print(f"\n--- ELABORAZIONE QUERY: {query.upper()} ---")
+            page.goto(f"https://www.reddit.com/r/{subreddit_name}/search/?q={query}&restrict_sr=1&t=all")
+            time.sleep(3)
+            
+            # Scrolling...
+            for _ in range(3):
+                page.mouse.wheel(0, 2000)
+                time.sleep(1)
+
+            links = [n.get_attribute('href') for n in page.locator('a[data-testid="post-title"]').all()]
+            unique_links = list(set([f"https://www.reddit.com{l}" if l.startswith('/') else l for l in links]))
+
+            current_batch = []
+            for post_url in unique_links:
+                if len(current_batch) >= MAX_POSTS_PER_KEYWORD: break
+
+                try:
+                    page.goto(post_url)
+                    page.wait_for_selector('shreddit-post', timeout=8000)
+                    post_object = page.locator('shreddit-post').first
+                    
+                    if post_object.get_attribute('post-type') != 'image': continue
+                    image_url = post_object.get_attribute('content-href')
+                    if not image_url or "i.redd.it" not in image_url: continue
+
+                    # Analisi dell'immagine IN MEMORIA
+                    img_features = analyze_image_from_url(image_url)
+                    
+                    if img_features:
+                        raw_ts = post_object.get_attribute('created-timestamp')
+                        dt_object = datetime.fromisoformat(raw_ts.replace('Z', '+00:00'))
+
+                        record = {
+                            "post_id": post_object.get_attribute('id'),
+                            "title": post_object.get_attribute('post-title'),
+                            "score": int(post_object.get_attribute('score') or 0),
+                            "comments": int(post_object.get_attribute('comment-count') or 0),
+                            "date_full": dt_object.strftime('%Y-%m-%d %H:%M:%S'),
+                            "url": post_url,
+                            "image_url": image_url,
+                            "query_used": query,
+                            # Inserimento nuove feature
+                            "img_blurriness": img_features['blurriness'],
+                            "img_warmth": img_features['warmth'],
+                            "img_centering": img_features['centering']
+                        }
+                        current_batch.append(record)
+                        print(f"  [{len(current_batch)}] Analizzato con successo: {record['post_id']}")
+                except Exception: continue
+            
+            if current_batch:
+                save_and_append_data(current_batch)
+
+        browser.close()
+
+if _name_ == "_main_":
+    scrape_reddit_multi_keyword(SUBREDDIT)

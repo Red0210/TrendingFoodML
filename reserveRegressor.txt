@@ -1,0 +1,166 @@
+import pandas as pd
+import numpy as np
+import re
+from pathlib import Path
+import nltk
+from nltk.stem.snowball import SnowballStemmer
+from sklearn.model_selection import cross_validate, KFold
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS # Importate stop words
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.compose import TransformedTargetRegressor
+
+# --- CONFIGURAZIONE PESI POPOLARITÀ ---
+N_WEIGHT = 1  # Peso degli Upvotes
+M_WEIGHT = 10 # Peso dei Commenti
+
+# --- CONFIGURAZIONE NLP ---
+stemmer = SnowballStemmer("english")
+# Utilizziamo un set per rendere il controllo delle stop-words istantaneo
+STOP_WORDS = set(ENGLISH_STOP_WORDS)
+
+def advanced_tokenizer(text):
+    if not text:
+        return []
+    
+    # 1. RIMOZIONE FLAIR (Testo tra parentesi quadre: [Homemade], [I ate], ecc.)
+    # Il pattern r"\[.*?\]" trova le parentesi e tutto quello che c'è dentro
+    text = re.sub(r"\[.*?\]", "", text)
+    
+    # 2. LOWERCASE e PULIZIA (Punteggiatura)
+    clean_text = re.sub(r"[^a-z\s]", "", text.lower())
+    
+    # 3. TOKENIZZAZIONE
+    words = clean_text.split()
+    
+    # 4. STOP WORDS e STEMMING
+    tokens = [
+        stemmer.stem(w) 
+        for w in words 
+        if w not in STOP_WORDS and len(w) > 2
+    ]
+    
+    return tokens
+
+# --- 1. CARICAMENTO E PREPARAZIONE DATI ---
+BASE_PROJECT_PATH = Path.home() / "Desktop" / "scrapingForFood"
+FILE_NAME = BASE_PROJECT_PATH / "reddit_food_full_dataset.json"
+
+if not FILE_NAME.exists():
+    raise FileNotFoundError(f"File non trovato: {FILE_NAME}")
+
+df = pd.read_json(FILE_NAME)
+
+df['title'] = df['title'].fillna('')
+df['post_text'] = df['post_text'].fillna('')
+
+X = df[['hour', 'img_blurriness', 'img_warmth', 'img_saturation', 
+        'img_centering', 'is_weekend', 'day_of_week', 'title', 'post_text']]
+
+# --- 2. PIPELINE DI PREPROCESSING ---
+preprocessor = ColumnTransformer(
+    transformers=[
+        # Stop_words rimosso dal costruttore perché gestito internamente al tokenizer
+        ('title_vec', TfidfVectorizer(
+            tokenizer=advanced_tokenizer, 
+            max_features=150,
+            token_pattern=None
+        ), 'title'),
+        
+        ('text_vec', TfidfVectorizer(
+            tokenizer=advanced_tokenizer, 
+            max_features=150, 
+            token_pattern=None
+        ), 'post_text'),
+        
+        ('cat_encode', OneHotEncoder(handle_unknown='ignore'), ['day_of_week']),
+        ('num_features', 'passthrough', ['hour', 'img_blurriness', 'img_warmth', 
+                                         'img_saturation', 'img_centering', 'is_weekend'])
+    ]
+)
+
+# --- 3. DEFINIZIONE PIPELINE MODELLO CON TRASFORMAZIONE LOG ---
+def get_log_model():
+    # Creiamo il regressore base
+    rf = RandomForestRegressor(n_estimators=500, random_state=42, n_jobs=-1)
+    
+    # Avvolgiamo il regressore in un TransformedTargetRegressor
+    # func=np.log1p applica log(1+x) prima di allenare
+    # inverse_func=np.expm1 applica exp(x)-1 dopo la predizione per tornare alla scala reale
+    return Pipeline(steps=[
+        ('preprocessor', preprocessor),
+        ('regressor', TransformedTargetRegressor(
+            regressor=rf, 
+            func=np.log1p, 
+            inverse_func=np.expm1
+        ))
+    ])
+# --- 4. CONFIGURAZIONE CROSS-VALIDATION ---
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+scoring_metrics = {
+    'MAE': 'neg_mean_absolute_error',
+    'MSE': 'neg_mean_squared_error',
+    'RMSE': 'neg_root_mean_squared_error',
+}
+
+# --- 5. ESECUZIONE ML PER UPVOTES (CON LOG) ---
+print(f"[INFO] Valutazione modello UPVOTES (Log-Transformed)...")
+cv_upvotes = cross_validate(get_log_model(), X, df['score'], cv=kf, scoring=scoring_metrics)
+
+# --- 6. ESECUZIONE ML PER COMMENTI (CON LOG) ---
+print(f"[INFO] Valutazione modello COMMENTI (Log-Transformed)...")
+cv_comments = cross_validate(get_log_model(), X, df['comments'], cv=kf, scoring=scoring_metrics)
+
+# --- 7. FIT FINALE PER PREDIZIONE ---
+model_u = get_log_model().fit(X, df['score'])
+model_c = get_log_model().fit(X, df['comments'])
+# --- 8. OUTPUT RISULTATI ---
+print("\n" + "="*50)
+print("       RISULTATI CROSS-VALIDATION COMPLETI")
+print("="*50)
+
+# Funzione interna veloce per stampare le metriche di un set di risultati
+def print_metrics(label, results):
+    print(f"\n>>> TARGET: {label}")
+    # Scikit-learn restituisce valori negativi, usiamo '-' per invertirli
+    print(f"  MAE  (Mean Absolute Error):      {-results['test_MAE'].mean():.2f}")
+    print(f"  MSE  (Mean Squared Error):       {-results['test_MSE'].mean():.2f}")
+    print(f"  RMSE (Root Mean Squared Error):  {-results['test_RMSE'].mean():.2f}")
+
+# Stampa per Upvotes
+print_metrics("UPVOTES (SCORE)", cv_upvotes)
+
+# Stampa per Commenti
+print_metrics("COMMENTI", cv_comments)
+"""
+print("\n" + "-"*50)
+print(f"Esempio primi 3 post (Popolarità Predetta vs Reale):")
+print(df[['actual_pop', 'predicted_pop']].head(3).round(2))
+print("="*50)
+"""
+
+# Estraiamo il modello di upvotes addestrato (modello finale)
+final_model_u = model_u.named_steps['regressor'].regressor_
+preprocessor_fitted = model_u.named_steps['preprocessor']
+
+# Recuperiamo i nomi delle colonne generate dal preprocessor
+# (Specialmente quelle create dal TF-IDF e dall'OneHotEncoder)
+ohe_feature_names = preprocessor_fitted.named_transformers_['cat_encode'].get_feature_names_out()
+title_features = [f"title_{f}" for f in preprocessor_fitted.named_transformers_['title_vec'].get_feature_names_out()]
+text_features = [f"text_{f}" for f in preprocessor_fitted.named_transformers_['text_vec'].get_feature_names_out()]
+num_features = ['hour', 'img_blurriness', 'img_warmth', 'img_saturation', 'img_centering', 'is_weekend']
+
+all_features = np.concatenate([title_features, text_features, ohe_feature_names, num_features])
+
+# Creiamo un DataFrame con le importanze
+importances = pd.DataFrame({
+    'feature': all_features,
+    'importance': final_model_u.feature_importances_
+}).sort_values(by='importance', ascending=False)
+
+print("\n--- TOP 10 FEATURE PIÙ IMPORTANTI ---")
+print(importances.head(10))

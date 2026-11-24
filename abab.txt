@@ -1,0 +1,50 @@
+==================================================
+       PERFORMANCE INDEXES (PERCENTILE 50.0%)
+==================================================
+ACCURACY MEDIA (CV): 63.41%
+F1-SCORE MEDIO (CV): 65.34%
+AUC-ROC MEDIO  (CV): 0.69
+--------------------------------------------------
+REPORT DETTAGLIATO:
+              precision    recall  f1-score   support
+
+  Insuccesso       0.62      0.51      0.56       136
+    Successo       0.56      0.66      0.61       128
+
+    accuracy                           0.59       264
+   macro avg       0.59      0.59      0.59       264
+weighted avg       0.59      0.59      0.59       264
+
+
+--- CONFUSION MATRIX ---
+                  Pred_Insuccesso  Pred_Successo
+Reale_Insuccesso               70             66
+Reale_Successo                 43             85
+
+--- TOP 10 FEATURE ---
+            feature  importance
+308  img_blurriness    0.074362
+310  img_saturation    0.067699
+309      img_warmth    0.066742
+307            hour    0.066220
+311   img_centering    0.062429
+140       title_veg    0.017231
+57        title_fri    0.015249
+29    title_chicken    0.013962
+112      title_sauc    0.013717
+99    title_pumpkin    0.013185
+
+==================================================
+       CONFRONTO: RANDOM FOREST VS DUMMY
+==================================================
+RF Accuracy:    63.41%
+Dummy Accuracy: 46.14%
+MIGLIORAMENTO NETTO: +17.27%
+
+--- ERROR ANALYSIS & VARIANCE ---
+Distribuzione Reale - Insuccesso: 50.08%, Successo: 49.92%
+False Positive Rate (FPR): 48.53%
+False Negative Rate (FNR): 33.59%
+Varianza Accuracy (CV): 0.001367
+Deviazione Standard (CV): 3.70%
+AUC-ROC Finale (Test Set): 0.6601

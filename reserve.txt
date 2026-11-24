@@ -1,0 +1,145 @@
+import os
+import time
+import pandas as pd
+from playwright.sync_api import sync_playwright
+from datetime import datetime, timedelta, timezone
+
+# --- CONFIGURATION ---
+FILE_NAME = "reddit_food_full_dataset.json"
+SUBREDDIT = "food"
+KEYWORDS = ["sushi", "cake"] 
+
+# --- SAFETY LIMITS ---
+MAX_POSTS_PER_KEYWORD = 50 
+MAX_TOTAL_POSTS = 500      
+MAX_RUNTIME_MINUTES = 30    # Lo script si ferma dopo 30 minuti
+
+def get_current_total():
+    """Returns the number of posts currently in the JSON file."""
+    if os.path.exists(FILE_NAME):
+        try:
+            temp_df = pd.read_json(FILE_NAME)
+            return len(temp_df)
+        except:
+            return 0
+    return 0
+
+def save_and_append_data(new_posts):
+    """Loads existing JSON, appends new data, removes duplicates, and saves."""
+    if not new_posts:
+        return
+    if os.path.exists(FILE_NAME):
+        try:
+            existing_df = pd.read_json(FILE_NAME)
+        except Exception:
+            existing_df = pd.DataFrame()
+    else:
+        existing_df = pd.DataFrame()
+
+    new_df = pd.DataFrame(new_posts)
+    final_df = pd.concat([existing_df, new_df], ignore_index=True)
+    
+    if not final_df.empty:
+        final_df.drop_duplicates(subset=['url'], keep='first', inplace=True)
+    
+    final_df.to_json(FILE_NAME, orient="records", indent=4)
+    print(f"\n[SYSTEM] Dataset updated. Total unique posts in file: {len(final_df)}")
+
+def scrape_reddit_multi_keyword(subreddit_name):
+    date_limit = datetime.now(timezone.utc) - timedelta(days=30)
+    start_time = time.time() # Tempo di inizio script
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context(locale="en-US")
+        page = context.new_page()
+
+        for query in KEYWORDS:
+            # SAFETY CHECK 1: Global post limit
+            current_total = get_current_total()
+            if current_total >= MAX_TOTAL_POSTS:
+                print(f"\n[STOP] Global post limit reached. Ending script.")
+                break
+            
+            # SAFETY CHECK 2: Time limit
+            elapsed_minutes = (time.time() - start_time) / 60
+            if elapsed_minutes >= MAX_RUNTIME_MINUTES:
+                print(f"\n[STOP] Time limit of {MAX_RUNTIME_MINUTES} min reached. Ending script.")
+                break
+
+            print(f"\n--- STARTING SEARCH FOR: {query.upper()} (Elapsed: {elapsed_minutes:.1f} min) ---")
+            initial_links = []
+            
+            url_ricerca = f"https://www.reddit.com/r/{subreddit_name}/search/?q={query}&restrict_sr=1&t=all"
+            page.goto(url_ricerca)
+            
+            time.sleep(3)
+            try:
+                page.get_by_role("button", name="Accept all", exact=False).click()
+            except:
+                pass
+
+            print(f"Scrolling to find links for '{query}'...")
+            for _ in range(8):
+                page.mouse.wheel(0, 4000)
+                time.sleep(2)
+
+            post_elements = page.locator('a[data-testid="post-title"]').all()
+            for el in post_elements:
+                link = el.get_attribute('href')
+                if link:
+                    full_url = f"https://www.reddit.com{link}" if link.startswith('/') else link
+                    initial_links.append(full_url)
+            
+            unique_links = list(set(initial_links))
+            print(f"Found {len(unique_links)} unique links. Target for keyword: {MAX_POSTS_PER_KEYWORD}")
+
+            current_batch = []
+            for i, post_url in enumerate(unique_links):
+                # Inner Safety Check: Time limit (checked during deep scraping)
+                if (time.time() - start_time) / 60 >= MAX_RUNTIME_MINUTES:
+                    print(f"\n[STOP] Time limit reached during deep scraping. Saving and exiting.")
+                    break
+                
+                # Keyword post limit
+                if len(current_batch) >= MAX_POSTS_PER_KEYWORD:
+                    print(f"  [LIMIT] Reached {MAX_POSTS_PER_KEYWORD} posts for '{query}'.")
+                    break
+
+                try:
+                    page.goto(post_url)
+                    page.wait_for_selector('shreddit-post', timeout=10000)
+                    
+                    main_post = page.locator('shreddit-post').first
+                    ts_string = main_post.get_attribute('created-timestamp')
+                    post_date = datetime.fromisoformat(ts_string.replace('Z', '+00:00'))
+
+                    if post_date < date_limit:
+                        data = {
+                            "title": main_post.get_attribute('post-title'),
+                            "score": main_post.get_attribute('score'),
+                            "author": main_post.get_attribute('author'),
+                            "comments": main_post.get_attribute('comment-count'),
+                            "date_full": post_date.strftime('%Y-%m-%d %H:%M:%S'),
+                            "hour": post_date.hour,                              
+                            "day_of_week": post_date.strftime('%A'),
+                            "is_weekend": post_date.weekday() >= 5,
+                            "url": post_url,
+                            "flair": main_post.get_attribute('flair-text'),
+                            "query_used": query
+                        }
+                        current_batch.append(data)
+                        print(f"  [{len(current_batch)}/{MAX_POSTS_PER_KEYWORD}] Captured: {data['title'][:30]}...")
+                    
+                    time.sleep(1) 
+                except Exception:
+                    continue
+            
+            # Always save after a keyword or if time runs out
+            if current_batch:
+                save_and_append_data(current_batch)
+
+        browser.close()
+
+if __name__ == "__main__":
+    scrape_reddit_multi_keyword(SUBREDDIT)

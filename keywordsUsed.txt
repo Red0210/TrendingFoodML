@@ -1,0 +1,7 @@
+"pizza", "burger", "pasta", "sushi", "taco", "pie", "cake", "mexican", "cheesecake", "italian", "chinese", "asian",
+ "ice cream", "Pro\/Chef", "[Homemade]", "[I ate]", "amazing", "delicious", "big", "roll", "cook",
+  "spicy", "red", "yellow", "green", "curry", "wurst", "cooked", "dish", "restaurant", "steak",
+  "pumpkin", "cinnamon",  "fries", "chocolate", "salmon", "ate", "veg", "fruit", 
+   "sweet", "bake", "fish", "fried", "chicken", "octopus", "chips", "cookies", "cream",
+   "caramel", "fresh", "coconut", "vanilla", "candy", "rice", "charcuterie", 
+   "home", "made", "marshmallow", "macarons", "bone"
